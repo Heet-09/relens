@@ -27,7 +27,7 @@ class ExtractedRecord(BaseModel):
     )
 
 
-IntentLiteral = Literal["factual_qa", "amenity_filter", "unit_filter", "comparison", "summarization"]
+IntentLiteral = Literal["factual_qa", "amenity_filter", "unit_filter", "comparison", "summarization", "general"]
 
 
 class IntentClassification(BaseModel):
@@ -36,16 +36,51 @@ class IntentClassification(BaseModel):
     amenities: list[str] = Field(default_factory=list)
     unit_filter_type: Optional[str] = None
     comparison_dimensions: list[str] = Field(default_factory=list)
+    resolved_question: Optional[str] = Field(
+        default=None,
+        description="Only set when the question is a follow-up relying on conversation history "
+        "(pronouns, omitted subject, 'the second one', etc.) — the same question rewritten to "
+        "stand on its own. Leave empty/null otherwise.",
+    )
+    sub_questions: list[str] = Field(
+        default_factory=list,
+        description="Only set when the question genuinely asks 2-4 separate things needing different "
+        "answers (e.g. 'summarize X and compare it to Y on price'). Each entry is one standalone "
+        "sub-question. Leave empty for a single-part question.",
+    )
+
+
+class FilterCondition(BaseModel):
+    condition: str = Field(description="One atomic condition from the criteria string, restated briefly.")
+    satisfied: bool = Field(description="Whether THIS record satisfies THIS condition specifically.")
 
 
 class FilterMatch(BaseModel):
     project_name: str
     reason: str
+    conditions: list[FilterCondition] = Field(
+        default_factory=list,
+        description="The criteria string split into its individual atomic conditions (one entry per "
+        "condition, even if there's only one), each marked satisfied/not for this specific record. "
+        "A record must have every condition satisfied to belong in matches at all.",
+    )
 
 
 class FilterResult(BaseModel):
     matches: list[FilterMatch] = Field(default_factory=list)
-    summary: str
+    summary: str = Field(
+        description="One short sentence (<= 25 words) describing the result itself — e.g. how many "
+        "projects matched and why. Never mention JSON, formatting, schemas, instructions, or your "
+        "own compliance with them."
+    )
+
+
+class ConditionSplit(BaseModel):
+    conditions: list[str] = Field(
+        description="The criteria string split into independent conditions that must ALL be true "
+        "(AND) for a record to match. A criteria with no genuine 'and'/'both'/'&'-joined independent "
+        "requirements yields a single-item list containing the original criteria unchanged."
+    )
 
 
 class ComparisonValue(BaseModel):
@@ -60,7 +95,10 @@ class ComparisonRow(BaseModel):
 
 class ComparisonResult(BaseModel):
     rows: list[ComparisonRow] = Field(default_factory=list)
-    summary: str
+    summary: str = Field(
+        description="One short sentence (<= 25 words) describing the comparison itself. Never "
+        "mention JSON, formatting, schemas, instructions, or your own compliance with them."
+    )
 
 
 class ProjectRecord(BaseModel):

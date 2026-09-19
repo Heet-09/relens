@@ -4,15 +4,22 @@
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 
 import chromadb
 
 log = logging.getLogger(__name__)
 
+# Guards the Chroma add() and structured-record write below: cheap, fast operations, but
+# multiple documents can now be ingested concurrently, so their final "commit to store" step
+# must not race (Chroma's sqlite backend isn't guaranteed safe against concurrent writers).
+_write_lock = threading.Lock()
+
 DATA_DIR = Path(os.environ.get("RELENS_DATA_DIR", "data"))
 CHROMA_DIR = DATA_DIR / "chroma"
 STRUCTURED_DIR = DATA_DIR / "structured"
+PAGES_DIR = DATA_DIR / "pages"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 
 _chroma_client = None
@@ -49,8 +56,17 @@ def add_chunks(chunks, embeddings) -> None:
         for c in chunks
     ]
     documents = [c.text for c in chunks]
-    collection.add(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+    with _write_lock:
+        collection.add(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
     log.info("Added %d chunks to Chroma for doc_id=%s", len(chunks), chunks[0].doc_id)
+
+
+def count_chunks_for_doc(doc_id: str) -> int:
+    collection = get_collection()
+    if collection.count() == 0:
+        return 0
+    result = collection.get(where={"doc_id": doc_id})
+    return len(result["ids"])
 
 
 def query_chunks(query_embedding, top_k: int = 6, doc_id: str | None = None) -> list[dict]:
@@ -76,7 +92,8 @@ def query_chunks(query_embedding, top_k: int = 6, doc_id: str | None = None) -> 
 def save_record(record) -> None:
     STRUCTURED_DIR.mkdir(parents=True, exist_ok=True)
     path = STRUCTURED_DIR / f"{record.doc_id}.json"
-    path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+    with _write_lock:
+        path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
     log.info("Saved structured record doc_id=%s project=%r -> %s", record.doc_id, record.project_name, path)
 
 
@@ -86,6 +103,22 @@ def load_all_records() -> list[dict]:
     for path in sorted(STRUCTURED_DIR.glob("*.json")):
         records.append(json.loads(path.read_text(encoding="utf-8")))
     return records
+
+
+def save_pages(doc_id: str, pages) -> None:
+    """Cache extracted (post-vision) page text — the expensive-to-recompute artifact — so the
+    vector index can be rebuilt cheaply (local re-embed, no Gemini vision calls) if it's ever
+    lost to a crash, a corrupted restart, or manual deletion."""
+    PAGES_DIR.mkdir(parents=True, exist_ok=True)
+    path = PAGES_DIR / f"{doc_id}.json"
+    path.write_text(json.dumps([p.model_dump() for p in pages], indent=2), encoding="utf-8")
+
+
+def load_pages(doc_id: str) -> list[dict] | None:
+    path = PAGES_DIR / f"{doc_id}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def resolve_doc_ids(project_names: list[str] | None) -> list[str] | None:

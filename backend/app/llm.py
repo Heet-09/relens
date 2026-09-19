@@ -10,6 +10,7 @@ import os
 import time
 from typing import TypeVar
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
@@ -23,6 +24,7 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
+REQUEST_TIMEOUT_MS = 60_000  # without this, a stalled call hangs forever — nothing times it out
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -47,20 +49,34 @@ def _embedding_model() -> SentenceTransformer:
 
 
 def _generate_content(**kwargs):
-    """generate_content with a short retry for transient 503 (model overloaded) errors."""
+    """generate_content with a bounded timeout (so a stalled call fails instead of hanging
+    forever) and a short retry for transient errors: 503 overload, 429 rate-limit, and
+    network timeouts/drops. Other 4xx errors (bad request, auth, ...) are not retried."""
     label = kwargs.get("model", GEMINI_MODEL)
+    config = kwargs.get("config") or genai_types.GenerateContentConfig()
+    config.http_options = genai_types.HttpOptions(timeout=REQUEST_TIMEOUT_MS)
+    kwargs["config"] = config
+
     for attempt in range(MAX_RETRIES):
         try:
             resp = _gemini().models.generate_content(**kwargs)
             log.debug("Gemini call ok (model=%s, attempt=%d)", label, attempt + 1)
             return resp
-        except genai_errors.ServerError as exc:
+        except genai_errors.ClientError as exc:
+            if exc.code != 429 or attempt == MAX_RETRIES - 1:
+                raise
+            wait = RETRY_BACKOFF_SECONDS * (attempt + 1)
+            log.warning(
+                "Gemini rate-limited (attempt %d/%d), retrying in %ds: %s", attempt + 1, MAX_RETRIES, wait, exc
+            )
+            time.sleep(wait)
+        except (genai_errors.ServerError, httpx.TimeoutException, httpx.ConnectError) as exc:
             if attempt == MAX_RETRIES - 1:
                 log.error("Gemini call failed after %d attempts: %s", MAX_RETRIES, exc)
                 raise
             wait = RETRY_BACKOFF_SECONDS * (attempt + 1)
             log.warning(
-                "Gemini overloaded (attempt %d/%d), retrying in %ds: %s", attempt + 1, MAX_RETRIES, wait, exc
+                "Gemini call failed (attempt %d/%d), retrying in %ds: %s", attempt + 1, MAX_RETRIES, wait, exc
             )
             time.sleep(wait)
 
@@ -74,8 +90,44 @@ def chat_text(prompt: str, system: str | None = None, max_tokens: int = 1024) ->
     return text
 
 
+STRUCTURED_PARSE_RETRIES = 3
+REPETITION_MIN_WORDS = 20  # below this, a low unique-word ratio is just a short natural phrase
+REPETITION_UNIQUE_RATIO = 0.3  # below this fraction of unique words, treat as a decoding loop
+
+
+def _repetition_loop_field(obj) -> str | None:
+    """Gemini occasionally falls into a decoding loop on a long free-text field (e.g. `summary`)
+    and fills it with the same handful of filler words repeated dozens of times — valid JSON, so
+    the parse succeeds, but the content is garbage. Returns the offending text if found, so the
+    caller can retry the same way it retries genuinely invalid JSON."""
+    texts: list[str] = []
+
+    def collect(o):
+        if isinstance(o, str):
+            texts.append(o)
+        elif isinstance(o, dict):
+            for v in o.values():
+                collect(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect(v)
+
+    collect(obj)
+    for text in texts:
+        words = text.split()
+        if len(words) < REPETITION_MIN_WORDS:
+            continue
+        if len(set(words)) / len(words) < REPETITION_UNIQUE_RATIO:
+            return text
+    return None
+
+
 def generate_structured(prompt: str, system: str, schema: type[T], max_tokens: int = 2048) -> T:
-    """Force Gemini to return JSON matching `schema`, parsed into an instance of it."""
+    """Force Gemini to return JSON matching `schema`, parsed into an instance of it. Retried a
+    couple times on invalid JSON — occasionally the model degenerates into a repetition loop and
+    gets cut off mid-object by max_output_tokens; re-asking usually gets a clean, shorter response.
+    Also retried if parsing succeeds but a text field is itself a repetition-loop (valid JSON,
+    garbage content) — see `_repetition_loop_field`."""
     log.debug("generate_structured: schema=%s prompt_len=%d max_tokens=%d", schema.__name__, len(prompt), max_tokens)
     config = genai_types.GenerateContentConfig(
         system_instruction=system,
@@ -83,14 +135,39 @@ def generate_structured(prompt: str, system: str, schema: type[T], max_tokens: i
         response_mime_type="application/json",
         response_schema=schema,
     )
-    resp = _generate_content(model=GEMINI_MODEL, contents=prompt, config=config)
-    try:
-        result = schema.model_validate_json(resp.text)
-    except Exception:
-        log.error("generate_structured: failed to parse %s from response (len=%s)", schema.__name__, len(resp.text or ""))
-        raise
-    log.debug("generate_structured: parsed %s ok", schema.__name__)
-    return result
+    last_exc: Exception | None = None
+    for attempt in range(STRUCTURED_PARSE_RETRIES):
+        resp = _generate_content(model=GEMINI_MODEL, contents=prompt, config=config)
+        try:
+            result = schema.model_validate_json(resp.text)
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "generate_structured: invalid JSON for %s (attempt %d/%d, response_len=%s): %s",
+                schema.__name__,
+                attempt + 1,
+                STRUCTURED_PARSE_RETRIES,
+                len(resp.text or ""),
+                exc,
+            )
+            continue
+
+        looped_text = _repetition_loop_field(result.model_dump())
+        if looped_text is not None:
+            last_exc = ValueError(f"repetition-loop degeneracy detected in a text field: {looped_text[:200]!r}...")
+            log.warning(
+                "generate_structured: repetition-loop degeneracy for %s (attempt %d/%d): %s",
+                schema.__name__,
+                attempt + 1,
+                STRUCTURED_PARSE_RETRIES,
+                last_exc,
+            )
+            continue
+
+        log.debug("generate_structured: parsed %s ok (attempt %d)", schema.__name__, attempt + 1)
+        return result
+    log.error("generate_structured: failed to parse %s after %d attempt(s)", schema.__name__, STRUCTURED_PARSE_RETRIES)
+    raise last_exc
 
 
 def vision_extract(image_bytes: bytes, prompt: str) -> str:

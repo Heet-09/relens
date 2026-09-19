@@ -6,8 +6,8 @@ import streamlit as st
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
-st.set_page_config(page_title="Realty Lens", page_icon="🏢", layout="wide")
-st.title("🏢 Realty Lens — Brochure Assistant")
+st.set_page_config(page_title="Realty Lens", page_icon="", layout="wide")
+st.title("Relens - The brochure based Assitant")
 st.caption("Ask questions about uploaded brochures. Answers are grounded strictly in the uploaded documents.")
 
 
@@ -24,10 +24,21 @@ def fetch_documents():
 def render_sources(sources):
     if not sources:
         return
+    grouped = {}
+    for s in sources:
+        key = (s.get("project_name") or s["source_file"], s["source_file"])
+        grouped.setdefault(key, set())
+        if s.get("page"):
+            grouped[key].add(s["page"])
+
     with st.expander("Sources"):
-        for s in sources:
-            page = f", p. {s['page']}" if s.get("page") else ""
-            st.write(f"- {s.get('project_name') or s['source_file']} ({s['source_file']}{page})")
+        for (label, source_file), pages in grouped.items():
+            if pages:
+                page_str = ", ".join(str(p) for p in sorted(pages))
+                suffix = f", pp. {page_str}" if len(pages) > 1 else f", p. {page_str}"
+            else:
+                suffix = ""
+            st.write(f"- {label} ({source_file}{suffix})")
 
 
 with st.sidebar:
@@ -59,28 +70,29 @@ with st.sidebar:
     else:
         st.write("No documents ingested yet.")
 
-def fetch_history():
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+if not st.session_state.get("history_loaded"):
+    # Only mark as loaded on a successful fetch — if the backend happens to be mid-restart
+    # right now, retry on the next rerun instead of permanently starting the session empty.
     try:
         resp = requests.get(f"{BACKEND_URL}/history", timeout=10)
         resp.raise_for_status()
-        return resp.json()
+        for entry in resp.json():
+            st.session_state.history.append({"role": "user", "content": entry["question"]})
+            st.session_state.history.append(
+                {
+                    "role": "assistant",
+                    "content": entry["answer_text"],
+                    "caption": f"intent: {entry['intent']}",
+                    "table": entry.get("table_data"),
+                    "sources": entry.get("sources"),
+                }
+            )
+        st.session_state.history_loaded = True
     except requests.RequestException:
-        return []
-
-
-if "history" not in st.session_state:
-    st.session_state.history = []
-    for entry in fetch_history():
-        st.session_state.history.append({"role": "user", "content": entry["question"]})
-        st.session_state.history.append(
-            {
-                "role": "assistant",
-                "content": entry["answer_text"],
-                "caption": f"intent: {entry['intent']}",
-                "table": entry.get("table_data"),
-                "sources": entry.get("sources"),
-            }
-        )
+        pass
 
 for turn in st.session_state.history:
     with st.chat_message(turn["role"]):
