@@ -2,7 +2,7 @@
 
 ## What it is
 A prototype assistant for Realty Lens staff: upload PDF project brochures, ask natural-language
-questions (factual Q&A, amenity/unit filters, comparisons, summaries), and get answers grounded
+questions and get answers grounded
 strictly in the uploaded documents — with a clear "not found" when the documents don't say.
 
 ## How it works
@@ -15,7 +15,7 @@ key, nothing leaves the machine. One forced structured-output Gemini call per do
 extracts a compact JSON record (developer, location, amenities, unit types). Multiple documents
 ingest concurrently.
 
-**Query:** a Gemini structured-output call routes each question to one of six intents.
+**Query:** a Gemini structured-output call routes each question its intents.
 Open-ended factual/spec questions use vector similarity search (optionally scoped to a named
 project) with page-level citations. Filter, comparison, and summarization questions instead scan
 the structured JSON store exhaustively across every document, since top-k similarity can
@@ -28,7 +28,7 @@ they're missing (crash, corrupted restart) — no re-spent Gemini vision calls.
 ## Key decisions and why
 - **Two retrieval paths, not one** — a single vector index would silently under-serve "list ALL
   projects with X" queries; splitting by intent trades complexity for correctness there.
-- **Gemini vision over Tesseract OCR** — one sample brochure is fully image-only; vision avoids
+- **Gemini vision over OCR** — one sample brochure is fully image-only; vision avoids
   an OS-dependent install and reads marketing layouts better, at the cost of per-page latency
   (bounded by a text-density threshold and page cap).
 - **Forced structured output everywhere reasoning needs to be trusted downstream** (extraction,
@@ -43,13 +43,13 @@ they're missing (crash, corrupted restart) — no re-spent Gemini vision calls.
   provenance and citations simple.
 
 ## Given more time
-I would the following
 
 - Confidence/uncertainty on extracted fields, surfaced to a human reviewer for low-confidence
   cases.
 - Streamed per-document upload progress instead of one blocking batch call.
-- Extend `tests/` with chunk-level retrieval recall and an LLM-judge faithfulness score for
-  free-text answers — the two eval dimensions not yet covered.
+- Add chunk-level retrieval recall and an LLM-judge faithfulness score for free-text answers —
+  the two eval dimensions not yet covered by the intent-routing and filter-precision evals we
+  ran (kept local, happy to share on request).
 - Real database instead of flat JSON/JSONL once multi-user/concurrent-writer access is needed.
 - Auth and per-user document scoping beyond a single-team prototype.
 - **Lead-qualification agent** on top of the existing filter path — take a client's stated

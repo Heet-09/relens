@@ -1,7 +1,6 @@
-# Realty Lens — Brochure Assistant (Gemini + local embeddings)
+# Realty Lens — Brochure Assistant
 
-Upload real-estate project brochure PDFs and ask natural-language questions — factual Q&A,
-amenity/unit filters, cross-document comparisons, and summaries — with answers grounded strictly
+Upload real-estate project brochure PDFs and ask natural-language questions — with answers grounded strictly
 in the uploaded documents. See [docs/architecture_diagram](docs/architecture_diagram.png) for the full pipeline
 diagram and [docs/one-pager.md](docs/one-pager.md) for key decisions.
 
@@ -55,8 +54,6 @@ These steps assume you have the repo checked out locally and nothing else set up
    GEMINI_API_KEY=your-key-here
    ```
 
-   (The other variables in `.env.example` are optional overrides — leave them commented out
-   to use the defaults.)
 
 6. **Start the backend API**, in one terminal (from the repo root, venv activated):
 
