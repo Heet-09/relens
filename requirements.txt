@@ -1,0 +1,16 @@
+# Combined requirements for local development (backend + frontend).
+# See backend/requirements.txt and frontend/requirements.txt for the split versions.
+
+fastapi
+uvicorn[standard]
+pymupdf
+google-genai
+sentence-transformers
+chromadb
+pydantic
+python-multipart
+python-dotenv
+
+streamlit
+requests
+pandas

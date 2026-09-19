@@ -1,0 +1,16 @@
+data/
+.env
+__pycache__/
+*.pyc
+*.pdf
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+backend_eval.log
+ingest_result.json
+lodha_retest.json
+mistakes.md
+plan.md
+q1.json
