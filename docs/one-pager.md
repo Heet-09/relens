@@ -2,14 +2,13 @@
 
 ## What it is
 A prototype assistant for Realty Lens staff: upload PDF project brochures, ask natural-language
-questions (factual Q&A, amenity/unit filters, cross-document comparisons, summaries), and get
-answers grounded strictly in the uploaded documents — including a graceful "not found" when the
+questions and get answers grounded strictly in the uploaded documents — including a graceful "not found" when the
 documents don't say.
 
 ## How it works
 Streamlit frontend + FastAPI backend. On upload: PyMuPDF extracts per-page text; pages with too
-little extractable text (common in graphics-heavy brochures, and the one fully-scanned sample
-PDF) are rasterized and read via Gemini's vision input instead of a separate OCR toolchain. Text
+little extractable text (common in graphics-heavy brochures, and the fully-scanned sample
+PDF) are sent and read via Gemini's vision input instead of a separate OCR toolchain. Text
 is chunked page-aware and embedded locally (`sentence-transformers`, `BAAI/bge-small-en-v1.5`)
 into a per-document Chroma collection — no embedding API key, nothing leaves the machine at this
 step; one additional forced structured-output Gemini call extracts a compact structured JSON
@@ -26,7 +25,7 @@ generation is constrained to answer only from the retrieved context.
 - **Two retrieval paths, not one.** A single vector index would silently under-serve "list ALL
   projects with X" queries. Splitting by intent trades a bit of complexity for correctness on the
   query types the brief explicitly calls out.
-- **Gemini vision over Tesseract OCR for scanned pages.** One of the 18 sample brochures is fully
+- **Gemini vision over OCR for scanned pages.** Many sample brochures may be fully
   image-only with zero extractable text — confirmed by direct inspection before building. Vision
   avoids an OS-dependent install step and reads marketing layouts more robustly than raw OCR,
   at the cost of per-page latency, mitigated by a text-density threshold and a page cap.
