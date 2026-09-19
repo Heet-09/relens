@@ -7,43 +7,82 @@ diagram and [docs/one-pager.md](docs/one-pager.md) for key decisions.
 
 ## Prerequisites
 - Python 3.11+
-- A [Gemini API key](https://aistudio.google.com/apikey) — used for chat generation, intent
-  routing, structured extraction, and vision reads of scanned/low-text pages
-- Embeddings run locally via `sentence-transformers` — no key needed, but the first run downloads
-  the model (~130MB for the default `BAAI/bge-small-en-v1.5`)
+- A [Gemini API key](https://aistudio.google.com/apikey) 
 
-## Setup
+## Setup and run (from a fresh clone)
 
-```bash
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
+These steps assume you have the repo checked out locally and nothing else set up yet.
 
-pip install -r requirements.txt
-# (or separately: pip install -r backend/requirements.txt -r frontend/requirements.txt)
+1. **Check your Python version.** You need Python 3.11 or newer.
 
-cp .env.example .env
-# then edit .env and set GEMINI_API_KEY
-```
+   ```bash
+   python --version
+   ```
 
-## Run
+2. **Create and activate a virtual environment**, from the repo root.
 
-In one terminal:
+   ```bash
+   python -m venv .venv
+   ```
 
-```bash
-uvicorn backend.app.main:app --reload
-```
+   ```bash
+   # Windows (PowerShell/cmd):
+   .venv\Scripts\activate
+   # macOS/Linux:
+   source .venv/bin/activate
+   ```
 
-In another terminal:
+3. **Install dependencies.**
 
-```bash
-streamlit run frontend/streamlit_app.py
-```
+   ```bash
+   pip install -r requirements.txt
+   # (or separately: pip install -r backend/requirements.txt -r frontend/requirements.txt)
+   ```
 
-Open the Streamlit URL it prints (default `http://localhost:8501`). Upload one or more brochure
-PDFs from the sidebar, wait for ingestion to finish, then ask questions in the chat box.
+4. **Get a Gemini API key.** Create one for free at
+   [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — it's used for chat
+   generation, intent routing, structured extraction, and vision reads of scanned pages.
+
+5. **Create your local `.env` file** and add the key.
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Open `.env` and set:
+
+   ```
+   GEMINI_API_KEY=your-key-here
+   ```
+
+   (The other variables in `.env.example` are optional overrides — leave them commented out
+   to use the defaults.)
+
+6. **Start the backend API**, in one terminal (from the repo root, venv activated):
+
+   ```bash
+   uvicorn backend.app.main:app --reload
+   ```
+
+   It listens on `http://localhost:8000` by default. Leave this terminal running. The first
+   time it starts, it will download the local embedding model (~130MB) if it isn't cached yet.
+
+7. **Start the frontend**, in a second terminal (same repo root, same venv activated):
+
+   ```bash
+   streamlit run frontend/streamlit_app.py
+   ```
+
+8. **Open the app.** Streamlit prints a local URL (default `http://localhost:8501`) — open it
+   in your browser. From the sidebar, upload one or more brochure PDFs, wait for ingestion to
+   finish, then ask questions in the chat box.
+
+### Troubleshooting
+- **Port already in use**: pass `--port <n>` to `uvicorn` or `streamlit run ... --server.port <n>`.
+- **`GEMINI_API_KEY` errors**: confirm `.env` is in the repo root (not inside `backend/`) and the
+  key has no surrounding quotes or spaces.
+- **Slow first request**: the embedding model download and first model load happen lazily on
+  first use — subsequent requests are fast.
 
 ## Notes
 - Uploaded PDFs, the vector index, and extracted structured records are written under `data/`

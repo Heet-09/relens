@@ -164,9 +164,9 @@ def _dispatch_single(question: str, known_projects: list[str], history: list[dic
     if allow_split and len(sub_questions) >= 2:
         log.info("Compound question %r split into %d sub-question(s)", question, len(sub_questions))
         parts, sources = [], []
-        for i, sub_q in enumerate(sub_questions, start=1):
+        for sub_q in sub_questions:
             _sub_intent, sub_result = _dispatch_single(sub_q, known_projects, history, allow_split=False)
-            parts.append(f"{i}. {sub_q}\n{sub_result['answer_text']}")
+            parts.append(sub_result["answer_text"])
             sources.extend(sub_result.get("sources", []))
         return "compound", {"answer_text": "\n\n".join(parts), "table_data": None, "sources": sources}
 

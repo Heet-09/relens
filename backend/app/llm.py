@@ -90,13 +90,44 @@ def chat_text(prompt: str, system: str | None = None, max_tokens: int = 1024) ->
     return text
 
 
-STRUCTURED_PARSE_RETRIES = 2
+STRUCTURED_PARSE_RETRIES = 3
+REPETITION_MIN_WORDS = 20  # below this, a low unique-word ratio is just a short natural phrase
+REPETITION_UNIQUE_RATIO = 0.3  # below this fraction of unique words, treat as a decoding loop
+
+
+def _repetition_loop_field(obj) -> str | None:
+    """Gemini occasionally falls into a decoding loop on a long free-text field (e.g. `summary`)
+    and fills it with the same handful of filler words repeated dozens of times — valid JSON, so
+    the parse succeeds, but the content is garbage. Returns the offending text if found, so the
+    caller can retry the same way it retries genuinely invalid JSON."""
+    texts: list[str] = []
+
+    def collect(o):
+        if isinstance(o, str):
+            texts.append(o)
+        elif isinstance(o, dict):
+            for v in o.values():
+                collect(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect(v)
+
+    collect(obj)
+    for text in texts:
+        words = text.split()
+        if len(words) < REPETITION_MIN_WORDS:
+            continue
+        if len(set(words)) / len(words) < REPETITION_UNIQUE_RATIO:
+            return text
+    return None
 
 
 def generate_structured(prompt: str, system: str, schema: type[T], max_tokens: int = 2048) -> T:
     """Force Gemini to return JSON matching `schema`, parsed into an instance of it. Retried a
     couple times on invalid JSON — occasionally the model degenerates into a repetition loop and
-    gets cut off mid-object by max_output_tokens; re-asking usually gets a clean, shorter response."""
+    gets cut off mid-object by max_output_tokens; re-asking usually gets a clean, shorter response.
+    Also retried if parsing succeeds but a text field is itself a repetition-loop (valid JSON,
+    garbage content) — see `_repetition_loop_field`."""
     log.debug("generate_structured: schema=%s prompt_len=%d max_tokens=%d", schema.__name__, len(prompt), max_tokens)
     config = genai_types.GenerateContentConfig(
         system_instruction=system,
@@ -120,6 +151,19 @@ def generate_structured(prompt: str, system: str, schema: type[T], max_tokens: i
                 exc,
             )
             continue
+
+        looped_text = _repetition_loop_field(result.model_dump())
+        if looped_text is not None:
+            last_exc = ValueError(f"repetition-loop degeneracy detected in a text field: {looped_text[:200]!r}...")
+            log.warning(
+                "generate_structured: repetition-loop degeneracy for %s (attempt %d/%d): %s",
+                schema.__name__,
+                attempt + 1,
+                STRUCTURED_PARSE_RETRIES,
+                last_exc,
+            )
+            continue
+
         log.debug("generate_structured: parsed %s ok (attempt %d)", schema.__name__, attempt + 1)
         return result
     log.error("generate_structured: failed to parse %s after %d attempt(s)", schema.__name__, STRUCTURED_PARSE_RETRIES)

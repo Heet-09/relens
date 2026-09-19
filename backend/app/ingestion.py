@@ -21,21 +21,30 @@ CHUNK_OVERLAP = 150
 MAX_STRUCTURED_INPUT_CHARS = 60000
 
 VISION_PROMPT = (
-    "This is a page from a real-estate project brochure. Transcribe all readable text: "
-    "headings, amenity names, unit specifications, tables, prices, locations, contact info. "
-    "Preserve structure with line breaks, and render any tables as plain text rows. "
-    "Do not add commentary or invent text that is not visible on the page."
+    "ROLE: Transcribe all readable text from this real-estate brochure page — headings, amenity "
+    "names, unit specifications, tables, prices, locations, contact info.\n\n"
+
+    "OUTPUT: preserve structure with line breaks; render any tables as plain text rows.\n\n"
+
+    "GROUNDING: do not add commentary or invent text that isn't visible on the page."
 )
 
 STRUCTURED_SYSTEM = (
-    "You extract structured facts from real-estate brochure text for a factual database. "
-    "Only use information explicitly present in the provided text. If a field is not stated, "
-    "use null (or an empty list for list fields) — never guess or invent a value.\n\n"
-    "For unit_types specifically: record every distinct unit type/configuration label mentioned "
-    "anywhere in the text (e.g. floor plan headings like '3 BHK', '2 BHK WITH STUDY'), even if its "
-    "area, price, or features are not stated. A unit type with an unknown area or price is still a "
-    "real unit type and must appear in the list with those fields set to null — do not omit it just "
-    "because it's incomplete."
+    "ROLE: Extract structured facts from real-estate brochure text for a factual database.\n\n"
+
+    "GROUNDING: use only information explicitly present in the text. If a field isn't stated, use "
+    "null (or an empty list for list fields) — never guess or invent a value.\n\n"
+
+    "PROCEDURE for unit_types: record every distinct unit type/configuration label mentioned anywhere "
+    "in the text (e.g. floor plan headings like '3 BHK', '2 BHK WITH STUDY'), even if its area, price, "
+    "or features aren't stated — an incomplete unit type is still a real one and must appear in the "
+    "list with those fields set to null.\n\n"
+
+    "PROCEDURE for amenities: list only concrete, individually named amenities (e.g. 'swimming pool', "
+    "'squash court', 'clubhouse'), one per entry. Omit a vague, generic, or catch-all claim ('multiple "
+    "sports facilities', 'various recreational amenities', 'world-class amenities') rather than adding "
+    "it as an entry — a generic claim with no named specific isn't a fact worth recording, and a "
+    "recorded vague phrase can later be mistaken by a filter for a specific amenity match."
 )
 
 
@@ -137,6 +146,9 @@ def extract_structured_record(full_text: str) -> dict:
 
 
 def ingest_document(pdf_bytes: bytes, filename: str) -> tuple[ProjectRecord, list[Chunk]]:
+    """Full per-document pipeline: page extraction -> structured-record extraction -> chunking.
+    Structured extraction runs on the full document text rather than per-chunk so amenities/unit
+    types scattered across pages get consolidated into one record instead of fragmenting."""
     doc_id = uuid.uuid4().hex[:12]
     log.info("ingest_document: start filename=%r doc_id=%s", filename, doc_id)
 

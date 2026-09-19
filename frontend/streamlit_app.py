@@ -6,8 +6,8 @@ import streamlit as st
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
-st.set_page_config(page_title="Realty Lens", page_icon="🏢", layout="wide")
-st.title("🏢 Realty Lens — Brochure Assistant")
+st.set_page_config(page_title="Realty Lens", page_icon="", layout="wide")
+st.title("Relens - The brochure based Assitant")
 st.caption("Ask questions about uploaded brochures. Answers are grounded strictly in the uploaded documents.")
 
 
@@ -24,10 +24,21 @@ def fetch_documents():
 def render_sources(sources):
     if not sources:
         return
+    grouped = {}
+    for s in sources:
+        key = (s.get("project_name") or s["source_file"], s["source_file"])
+        grouped.setdefault(key, set())
+        if s.get("page"):
+            grouped[key].add(s["page"])
+
     with st.expander("Sources"):
-        for s in sources:
-            page = f", p. {s['page']}" if s.get("page") else ""
-            st.write(f"- {s.get('project_name') or s['source_file']} ({s['source_file']}{page})")
+        for (label, source_file), pages in grouped.items():
+            if pages:
+                page_str = ", ".join(str(p) for p in sorted(pages))
+                suffix = f", pp. {page_str}" if len(pages) > 1 else f", p. {page_str}"
+            else:
+                suffix = ""
+            st.write(f"- {label} ({source_file}{suffix})")
 
 
 with st.sidebar:
