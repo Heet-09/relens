@@ -2,7 +2,7 @@
 
 Upload real-estate project brochure PDFs and ask natural-language questions — factual Q&A,
 amenity/unit filters, cross-document comparisons, and summaries — with answers grounded strictly
-in the uploaded documents. See [docs/architecture.md](docs/architecture.md) for the full pipeline
+in the uploaded documents. See [docs/architecture_diagram](docs/architecture_diagram.png) for the full pipeline
 diagram and [docs/one-pager.md](docs/one-pager.md) for key decisions.
 
 ## Prerequisites
