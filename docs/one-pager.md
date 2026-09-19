@@ -52,10 +52,7 @@ they're missing (crash, corrupted restart) — no re-spent Gemini vision calls.
   ran (kept local, happy to share on request).
 - Real database instead of flat JSON/JSONL once multi-user/concurrent-writer access is needed.
 - **Move Chroma off its local `PersistentClient` (SQLite-backed, single-process) to server mode
-  or a managed vector store** (Chroma server, Qdrant, pgvector) once the backend runs as more
-  than one replica — the in-process write lock that keeps concurrent ingestion safe today
-  doesn't coordinate writes across separate processes/replicas, and SQLite isn't built for that
-  either.
+  or a managed vector store** (Chroma server, Qdrant, pgvector)
 - Auth and per-user document scoping beyond a single-team prototype.
 - **Lead-qualification agent** on top of the existing filter path — take a client's stated
   requirements (budget, location, BHK) and auto-run the filter query to hand the sales rep a
