@@ -27,7 +27,7 @@ class ExtractedRecord(BaseModel):
     )
 
 
-IntentLiteral = Literal["factual_qa", "amenity_filter", "unit_filter", "comparison", "summarization"]
+IntentLiteral = Literal["factual_qa", "amenity_filter", "unit_filter", "comparison", "summarization", "general"]
 
 
 class IntentClassification(BaseModel):
@@ -36,6 +36,18 @@ class IntentClassification(BaseModel):
     amenities: list[str] = Field(default_factory=list)
     unit_filter_type: Optional[str] = None
     comparison_dimensions: list[str] = Field(default_factory=list)
+    resolved_question: Optional[str] = Field(
+        default=None,
+        description="Only set when the question is a follow-up relying on conversation history "
+        "(pronouns, omitted subject, 'the second one', etc.) — the same question rewritten to "
+        "stand on its own. Leave empty/null otherwise.",
+    )
+    sub_questions: list[str] = Field(
+        default_factory=list,
+        description="Only set when the question genuinely asks 2-4 separate things needing different "
+        "answers (e.g. 'summarize X and compare it to Y on price'). Each entry is one standalone "
+        "sub-question. Leave empty for a single-part question.",
+    )
 
 
 class FilterMatch(BaseModel):

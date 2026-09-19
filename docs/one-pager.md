@@ -9,18 +9,28 @@ documents don't say.
 ## How it works
 Streamlit frontend + FastAPI backend. On upload: PyMuPDF extracts per-page text; pages with too
 little extractable text (common in graphics-heavy brochures, and the one fully-scanned sample
-PDF) are rasterized and read via Gemini's vision input instead of a separate OCR toolchain. Text
-is chunked page-aware and embedded locally (`sentence-transformers`, `BAAI/bge-small-en-v1.5`)
-into a per-document Chroma collection — no embedding API key, nothing leaves the machine at this
-step; one additional forced structured-output Gemini call extracts a compact structured JSON
-record (developer, location, handover, amenities, unit types) per document.
+PDF) are rasterized and read via Gemini's vision input instead of a separate OCR toolchain. The
+extracted page text is cached to disk (`data/pages/<doc_id>.json`) before anything else happens
+to it. Text is then chunked page-aware and embedded locally (`sentence-transformers`,
+`BAAI/bge-small-en-v1.5`) into a Chroma collection — no embedding API key, nothing leaves the
+machine at this step; one additional forced structured-output Gemini call extracts a compact
+structured JSON record (developer, location, handover, amenities, unit types) per document.
+Multiple documents in one upload batch are ingested concurrently (bounded semaphore + thread
+pool), and within a document, vision calls for its low-text pages also run concurrently.
 
 At query time, a Gemini structured-output call routes the question to one of five intents. Open-ended
 factual/spec questions go to vector similarity search over chunks (optionally scoped to a named
 project) with page-level citations. Filter, comparison, and summarization questions instead scan
 the structured JSON store exhaustively across every ingested document, since top-k similarity
 search can silently miss a matching project when the query is a filter rather than a lookup. All
-generation is constrained to answer only from the retrieved context.
+generation is constrained to answer only from the retrieved context. Every question and answer is
+appended to a JSONL history log; the frontend replays it on load so a page refresh (or a restart
+of the Streamlit process) doesn't lose the conversation.
+
+On backend startup, a reconciliation pass compares the structured-record store against Chroma: any
+document whose chunks are missing (lost to a crash, a corrupted restart, or manual deletion) is
+rebuilt from its cached page text — a local re-embed with zero Gemini vision calls — instead of
+silently serving an ingested-but-unsearchable document or requiring a manual re-upload.
 
 ## Key decisions and why
 - **Two retrieval paths, not one.** A single vector index would silently under-serve "list ALL
@@ -39,6 +49,14 @@ generation is constrained to answer only from the retrieved context.
 - **Local embeddings instead of an embedding API.** Brochure text never leaves the machine for
   the vector-store step, and it removes one of the three external dependencies — at the cost of
   a heavier first-run model download and CPU-bound encode time versus a hosted embedding call.
+- **Cache raw page text, not just the vector index.** The Gemini vision calls are the expensive,
+  hard-to-reproduce part of ingestion; the embeddings are cheap and local. Caching the former
+  separately means the latter can always be rebuilt for free, which is what makes startup
+  self-healing possible without re-spending API quota.
+- **A single write lock around Chroma/structured-record writes**, once ingestion became
+  concurrent across documents. Chroma's SQLite backend isn't guaranteed safe against concurrent
+  writers, so the (cheap, fast) commit step is serialized while the (slow, network-bound)
+  extraction work ahead of it stays parallel.
 - **doc_id as the join key** between the vector store and structured store keeps per-document
   provenance simple and lets both paths cite back to a specific source file/page.
 
@@ -46,6 +64,8 @@ generation is constrained to answer only from the retrieved context.
 - Real hybrid retrieval (BM25 + embeddings) and re-ranking for factual Q&A on longer brochures.
 - Persist and expose confidence/uncertainty on extracted structured fields, and surface low-
   confidence extractions to a human reviewer.
-- Batch/async ingestion with progress streaming instead of a blocking upload call, for large PDFs.
+- Streamed upload progress per document instead of one blocking call for the whole batch.
 - Automated eval set (golden Q&A pairs per brochure) to catch retrieval/prompt regressions.
+- Move structured records and history off flat JSON/JSONL onto a real database once multi-user
+  access or concurrent writers from outside a single process become a requirement.
 - Auth and per-user document scoping if this moves beyond a single-team prototype.

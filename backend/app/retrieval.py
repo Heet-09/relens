@@ -27,16 +27,20 @@ FILTER_SYSTEM = (
     "location, price, or any other field) — evaluate ALL of them, not just the first one you notice. "
     "Match synonyms and nearby-area references sensibly (e.g. 'pool' matches 'swimming pool', 'near "
     "Andheri West' can match a location text that names Andheri West or an immediately adjacent area). "
-    "Only use the data given — never invent amenities or facts not present in the records. A null/missing "
-    "field means that fact is unknown for that project, not that it's absent — do not treat 'unknown' as "
-    "a non-match if every other condition is satisfied; note the uncertainty in your reason instead."
+    "Each record may also include a few raw brochure excerpts — consult those for any criterion not "
+    "captured in the structured fields above them. Only use the data given — never invent amenities or "
+    "facts not present in the records or excerpts. A null/missing field means that fact is unknown for "
+    "that project, not that it's absent — do not treat 'unknown' as a non-match if every other condition "
+    "is satisfied and the excerpts don't resolve it either; note the uncertainty in your reason instead."
 )
 
 COMPARE_SYSTEM = (
     "You build a side-by-side comparison table for real-estate projects using ONLY the provided data. "
-    "For any dimension not present in the data for a project, use the string 'not found'. Never invent facts. "
-    "Keep each value concise — a short phrase or comma-separated list, one sentence at most. Never reproduce "
-    "a full list (e.g. every amenity) verbatim; summarize it instead."
+    "Each record may include a few raw brochure excerpts below the structured fields — use those to "
+    "fill in a dimension that isn't present in the structured fields. Only if a dimension truly isn't "
+    "supported by either source, use the string 'not found'. Never invent facts. Keep each value concise "
+    "— a short phrase or comma-separated list, one sentence at most. Never reproduce a full list (e.g. "
+    "every amenity) verbatim; summarize it instead."
 )
 
 SUMMARY_SYSTEM = (
@@ -45,10 +49,23 @@ SUMMARY_SYSTEM = (
     "aren't present in the input."
 )
 
+GENERAL_SYSTEM = (
+    "You are the assistant for Realty Lens, a tool that answers questions strictly from a set of "
+    "uploaded real-estate project brochures. Respond to greetings, small talk, and meta questions "
+    "about what you can do or which projects/documents are loaded. Be brief and friendly. If asked "
+    "what you can do, mention that you can answer factual questions about a project, filter/compare "
+    "projects by criteria (amenities, unit types, price, location, developer), and summarize projects "
+    "— all grounded in the uploaded brochures only. If the question is unrelated to real-estate "
+    "brochures and isn't small talk or a meta question about this assistant, say briefly that you can "
+    "only help with the uploaded project brochures. Never answer real-estate factual questions here — "
+    "that only happens through the documents."
+)
 
-def _compact_table(records: list[dict]) -> str:
-    compact = [
-        {
+
+def _compact_table(records: list[dict], excerpts_by_doc_id: dict[str, list[str]] | None = None) -> str:
+    compact = []
+    for r in records:
+        entry = {
             "project_name": r.get("project_name"),
             "developer": r.get("developer"),
             "location": r.get("location"),
@@ -58,9 +75,31 @@ def _compact_table(records: list[dict]) -> str:
             "unit_types": r.get("unit_types", []),
             "other_facts": r.get("other_facts"),
         }
-        for r in records
-    ]
+        excerpts = (excerpts_by_doc_id or {}).get(r.get("doc_id"))
+        if excerpts:
+            entry["brochure_excerpts"] = excerpts
+        compact.append(entry)
     return json.dumps(compact, indent=2)
+
+
+def _excerpts_by_doc_id(records: list[dict], query_text: str, top_k: int = 3) -> dict[str, list[str]]:
+    """Per-project raw-chunk excerpts relevant to `query_text`, so filter/comparison can resolve
+    criteria that never made it into the structured extraction (loan partners, legal approvals,
+    parking ratio, ...) instead of silently treating them as absent. Local embeddings + a local
+    Chroma query per project — cheap at this corpus scale, and keeps the exhaustive-scan guarantee
+    since every record still gets looked at."""
+    if not records or not query_text:
+        return {}
+    [query_embedding] = llm.embed([query_text])
+    out: dict[str, list[str]] = {}
+    for r in records:
+        doc_id = r.get("doc_id")
+        if not doc_id:
+            continue
+        hits = store.query_chunks(query_embedding, top_k=top_k, doc_id=doc_id)
+        if hits:
+            out[doc_id] = [h["text"] for h in hits]
+    return out
 
 
 def answer_factual(question: str, doc_ids: list[str] | None = None) -> dict:
@@ -121,7 +160,8 @@ def filter_projects(criteria: str, names: list[str] | None = None) -> dict:
     if not records:
         return {"answer_text": NOT_FOUND, "table_data": None, "sources": []}
 
-    table = _compact_table(records)
+    excerpts = _excerpts_by_doc_id(records, criteria)
+    table = _compact_table(records, excerpts)
     prompt = f"Project data (JSON):\n{table}\n\nFilter request: {criteria}"
     result = llm.generate_structured(prompt, FILTER_SYSTEM, FilterResult, max_tokens=1024)
     log.info("filter_projects: criteria=%r names=%s -> %d match(es)", criteria, names, len(result.matches))
@@ -151,8 +191,9 @@ def compare_projects(names: list[str], dimensions: list[str]) -> dict:
     if not selected:
         return {"answer_text": NOT_FOUND, "table_data": None, "sources": []}
 
-    table = _compact_table(selected)
     dims = ", ".join(dimensions) if dimensions else "developer, location, expected handover, amenities, unit types"
+    excerpts = _excerpts_by_doc_id(selected, dims)
+    table = _compact_table(selected, excerpts)
     prompt = f"Project data (JSON):\n{table}\n\nCompare these projects across: {dims}"
     result = llm.generate_structured(prompt, COMPARE_SYSTEM, ComparisonResult, max_tokens=4000)
     log.info("compare_projects: names=%s dimensions=%s -> %d row(s)", names, dimensions, len(result.rows))
@@ -190,3 +231,13 @@ def summarize_projects(names: list[str] | None) -> dict:
         sources.append(Source(project_name=r.get("project_name"), source_file=r["source_file"]))
 
     return {"answer_text": "\n\n".join(summaries), "table_data": None, "sources": sources}
+
+
+def handle_general(question: str, known_projects: list[str]) -> dict:
+    """Greetings, "what can you do", and other meta/out-of-scope questions that don't need the
+    document pipeline at all — kept out of factual_qa so they don't produce an unhelpful
+    "not found in the uploaded documents" for something that was never a document lookup."""
+    projects_list = ", ".join(known_projects) if known_projects else "(none ingested yet)"
+    prompt = f"Ingested projects: {projects_list}\n\nUser message: {question}"
+    answer = llm.chat_text(prompt, system=GENERAL_SYSTEM, max_tokens=300)
+    return {"answer_text": answer, "table_data": None, "sources": []}

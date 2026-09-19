@@ -59,28 +59,29 @@ with st.sidebar:
     else:
         st.write("No documents ingested yet.")
 
-def fetch_history():
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+if not st.session_state.get("history_loaded"):
+    # Only mark as loaded on a successful fetch — if the backend happens to be mid-restart
+    # right now, retry on the next rerun instead of permanently starting the session empty.
     try:
         resp = requests.get(f"{BACKEND_URL}/history", timeout=10)
         resp.raise_for_status()
-        return resp.json()
+        for entry in resp.json():
+            st.session_state.history.append({"role": "user", "content": entry["question"]})
+            st.session_state.history.append(
+                {
+                    "role": "assistant",
+                    "content": entry["answer_text"],
+                    "caption": f"intent: {entry['intent']}",
+                    "table": entry.get("table_data"),
+                    "sources": entry.get("sources"),
+                }
+            )
+        st.session_state.history_loaded = True
     except requests.RequestException:
-        return []
-
-
-if "history" not in st.session_state:
-    st.session_state.history = []
-    for entry in fetch_history():
-        st.session_state.history.append({"role": "user", "content": entry["question"]})
-        st.session_state.history.append(
-            {
-                "role": "assistant",
-                "content": entry["answer_text"],
-                "caption": f"intent: {entry['intent']}",
-                "table": entry.get("table_data"),
-                "sources": entry.get("sources"),
-            }
-        )
+        pass
 
 for turn in st.session_state.history:
     with st.chat_message(turn["role"]):

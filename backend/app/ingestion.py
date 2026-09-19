@@ -1,18 +1,21 @@
 """PDF -> pages -> text/vision extraction -> chunking -> structured record."""
 
+import concurrent.futures
 import logging
+import os
 import re
 import uuid
 
 import fitz  # PyMuPDF
 
-from . import llm
+from . import llm, store
 from .schemas import Chunk, ExtractedRecord, PageText, ProjectRecord, UnitType
 
 log = logging.getLogger(__name__)
 
 LOW_TEXT_THRESHOLD = 200  # chars; pages below this are treated as low-text
 MAX_VISION_PAGES = 24  # cap Gemini vision calls per doc
+VISION_CONCURRENCY = int(os.environ.get("VISION_CONCURRENCY", "4"))  # concurrent Gemini vision calls per doc
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 MAX_STRUCTURED_INPUT_CHARS = 60000
@@ -27,7 +30,12 @@ VISION_PROMPT = (
 STRUCTURED_SYSTEM = (
     "You extract structured facts from real-estate brochure text for a factual database. "
     "Only use information explicitly present in the provided text. If a field is not stated, "
-    "use null (or an empty list for list fields) — never guess or invent a value."
+    "use null (or an empty list for list fields) — never guess or invent a value.\n\n"
+    "For unit_types specifically: record every distinct unit type/configuration label mentioned "
+    "anywhere in the text (e.g. floor plan headings like '3 BHK', '2 BHK WITH STUDY'), even if its "
+    "area, price, or features are not stated. A unit type with an unknown area or price is still a "
+    "real unit type and must appear in the list with those fields set to null — do not omit it just "
+    "because it's incomplete."
 )
 
 
@@ -52,16 +60,30 @@ def extract_pages(pdf_bytes: bytes) -> list[PageText]:
         else:
             vision_indices = set(low_text_indices)
 
+        # Rasterizing is fast (CPU, milliseconds) so it stays sequential here — PyMuPDF pages
+        # aren't safe to touch from multiple threads. The Gemini vision call is pure network
+        # wait per page and dominates total ingestion time, so those calls (and only those)
+        # run concurrently instead of one page at a time.
+        png_by_index = {i: doc[i].get_pixmap(dpi=150).tobytes("png") for i in vision_indices}
+        vision_text_by_index: dict[int, str] = {}
+        if png_by_index:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=VISION_CONCURRENCY) as pool:
+                future_to_index = {
+                    pool.submit(llm.vision_extract, png, VISION_PROMPT): i for i, png in png_by_index.items()
+                }
+                for future in concurrent.futures.as_completed(future_to_index):
+                    i = future_to_index[future]
+                    try:
+                        vision_text_by_index[i] = future.result()
+                    except Exception:
+                        log.exception("vision_extract failed for page %d", i + 1)
+                        vision_text_by_index[i] = ""
+
         pages: list[PageText] = []
         for i in range(len(doc)):
             text = raw_texts[i]
             if i in vision_indices:
-                pix = doc[i].get_pixmap(dpi=150)
-                png_bytes = pix.tobytes("png")
-                try:
-                    vision_text = llm.vision_extract(png_bytes, VISION_PROMPT)
-                except Exception:
-                    vision_text = ""
+                vision_text = vision_text_by_index.get(i, "")
                 combined = f"{text}\n{vision_text}".strip() if text else vision_text
                 pages.append(PageText(page_number=i + 1, text=combined, is_vision=True))
             else:
@@ -120,6 +142,7 @@ def ingest_document(pdf_bytes: bytes, filename: str) -> tuple[ProjectRecord, lis
 
     pages = extract_pages(pdf_bytes)
     is_scanned = any(p.is_vision for p in pages)
+    store.save_pages(doc_id, pages)
 
     full_text = "\n\n".join(f"[Page {p.page_number}]\n{p.text}" for p in pages if p.text.strip())
     raw = extract_structured_record(full_text)
