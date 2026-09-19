@@ -47,9 +47,7 @@ they're missing (crash, corrupted restart) — no re-spent Gemini vision calls.
 - Confidence/uncertainty on extracted fields, surfaced to a human reviewer for low-confidence
   cases.
 - Streamed per-document upload progress instead of one blocking batch call.
-- Add chunk-level retrieval recall and an LLM-judge faithfulness score for free-text answers —
-  the two eval dimensions not yet covered by the intent-routing and filter-precision evals we
-  ran (kept local, happy to share on request).
+- Add chunk-level retrieval recall and an LLM-judge faithfulness score for free-text answers.
 - Real database instead of flat JSON/JSONL once multi-user/concurrent-writer access is needed.
 - **Move Chroma off its local `PersistentClient` (SQLite-backed, single-process) to server mode
   or a managed vector store** (Chroma server, Qdrant, pgvector)
