@@ -10,7 +10,7 @@ Streamlit frontend + FastAPI backend. **Ingestion:** PyMuPDF extracts per-page t
 pages (graphics-heavy or fully-scanned brochures) are rasterized and read via Gemini vision
 instead of an OCR toolchain, with the vision budget split front/back since brochures put specs
 on their last pages. Extracted text is cached to disk before anything else touches it, then
-chunked page-aware and embedded locally (`sentence-transformers`) into Chroma — no embedding API
+chunked page-aware and embedded locally into Chroma — no embedding API
 key, nothing leaves the machine. One forced structured-output Gemini call per document also
 extracts a compact JSON record (developer, location, amenities, unit types). Multiple documents
 ingest concurrently.
@@ -51,10 +51,12 @@ they're missing (crash, corrupted restart) — no re-spent Gemini vision calls.
   the two eval dimensions not yet covered by the intent-routing and filter-precision evals we
   ran (kept local, happy to share on request).
 - Real database instead of flat JSON/JSONL once multi-user/concurrent-writer access is needed.
+- **Move Chroma off its local `PersistentClient` (SQLite-backed, single-process) to server mode
+  or a managed vector store** (Chroma server, Qdrant, pgvector) once the backend runs as more
+  than one replica — the in-process write lock that keeps concurrent ingestion safe today
+  doesn't coordinate writes across separate processes/replicas, and SQLite isn't built for that
+  either.
 - Auth and per-user document scoping beyond a single-team prototype.
 - **Lead-qualification agent** on top of the existing filter path — take a client's stated
   requirements (budget, location, BHK) and auto-run the filter query to hand the sales rep a
   shortlist, instead of the rep typing it themselves.
-- **Split the single-call comparison/summarization path into a small agent pipeline**
-  (extraction → drafting → tone/brand-voice check) once client-facing output volume justifies
-  the added latency for higher reliability.
