@@ -17,7 +17,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import llm, store
 from .ingestion import chunk_pages, ingest_document
 from .intent import classify_intent
-from .retrieval import answer_factual, compare_projects, filter_projects, handle_general, summarize_projects
+from .retrieval import (
+    answer_developer_info,
+    answer_factual,
+    answer_specification,
+    compare_projects,
+    filter_projects,
+    handle_general,
+    summarize_projects,
+)
 from .schemas import DocumentInfo, HistoryEntry, PageText, QueryRequest, QueryResponse, UploadResponse
 
 log = logging.getLogger(__name__)
@@ -163,12 +171,15 @@ def _dispatch_single(question: str, known_projects: list[str], history: list[dic
     sub_questions = intent_result.get("sub_questions") or []
     if allow_split and len(sub_questions) >= 2:
         log.info("Compound question %r split into %d sub-question(s)", question, len(sub_questions))
-        parts, sources = [], []
+        parts, sources, sub_intents = [], [], []
         for sub_q in sub_questions:
-            _sub_intent, sub_result = _dispatch_single(sub_q, known_projects, history, allow_split=False)
+            sub_intent, sub_result = _dispatch_single(sub_q, known_projects, history, allow_split=False)
             parts.append(sub_result["answer_text"])
             sources.extend(sub_result.get("sources", []))
-        return "compound", {"answer_text": "\n\n".join(parts), "table_data": None, "sources": sources}
+            if sub_intent not in sub_intents:
+                sub_intents.append(sub_intent)
+        compound_label = f"compound ({' + '.join(sub_intents)})"
+        return compound_label, {"answer_text": "\n\n".join(parts), "table_data": None, "sources": sources}
 
     resolved_question = intent_result.get("resolved_question") or question
     intent = intent_result.get("intent", "factual_qa")
@@ -187,7 +198,15 @@ def _dispatch_single(question: str, known_projects: list[str], history: list[dic
             result = compare_projects(project_names, comparison_dimensions)
         elif intent == "summarization":
             result = summarize_projects(project_names or None)
+        elif intent == "developer_info":
+            doc_ids = store.resolve_doc_ids(project_names)
+            result = answer_developer_info(resolved_question, doc_ids)
+        elif intent == "specification_lookup":
+            doc_ids = store.resolve_doc_ids(project_names)
+            result = answer_specification(resolved_question, doc_ids)
         else:
+            # factual_qa and any unrecognized intent: named-project lookup over structured facts
+            # + raw brochure chunks.
             doc_ids = store.resolve_doc_ids(project_names)
             result = answer_factual(resolved_question, doc_ids)
     except HTTPException:
@@ -202,7 +221,7 @@ def _dispatch_single(question: str, known_projects: list[str], history: list[dic
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest):
     log.info("Query received: %r", req.question)
-    records = store.load_all_records()
+    records = store.load_deduped_records()
     known_projects = [r.get("project_name") for r in records if r.get("project_name")]
     history = store.load_history(limit=6)
 

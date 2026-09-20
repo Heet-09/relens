@@ -46,12 +46,13 @@ they're missing (crash, corrupted restart) — no re-spent Gemini vision calls.
 
 - Confidence/uncertainty on extracted fields, surfaced to a human reviewer for low-confidence
   cases.
-- Streamed per-document upload progress instead of one blocking batch call.
 - Add chunk-level retrieval recall and an LLM-judge faithfulness score for free-text answers.
 - Real database instead of flat JSON/JSONL once multi-user/concurrent-writer access is needed.
 - **Move Chroma off its local `PersistentClient` (SQLite-backed, single-process) to server mode
   or a managed vector store** (Chroma server, Qdrant, pgvector)
-- Auth and per-user document scoping beyond a single-team prototype.
+- Route cheap/mechanical LLM calls (intent classification, condition splitting) to a smaller model; keep the current model where real reasoning is needed.
 - **Lead-qualification agent** on top of the existing filter path — take a client's stated
   requirements (budget, location, BHK) and auto-run the filter query to hand the sales rep a
   shortlist, instead of the rep typing it themselves.
+- **A more polished UI** — the current Streamlit frontend is functional but normal; a
+  proper front-end (richer chat layout, table/comparison rendering, upload progress)

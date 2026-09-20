@@ -4,9 +4,10 @@ a matching project)."""
 
 import json
 import logging
+import re
 
 from . import llm, store
-from .schemas import ComparisonResult, ConditionSplit, FilterMatch, FilterResult, Source
+from .schemas import ComparisonResult, ConditionSplit, FilterMatch, FilterResult, Source, UnitMatchSelection
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +20,11 @@ ANSWER_SYSTEM = (
     "GROUNDING: never use outside knowledge or invent a fact. If the answer isn't present in either "
     "source, say plainly that it wasn't found in the uploaded documents rather than guessing. When you "
     "state a fact, name the project it came from. If several items match a general description (e.g. "
-    "multiple unit configurations of the same bedroom count), list all of them, not just one.\n\n"
+    "multiple unit configurations of the same bedroom count), list all of them, not just one. But a "
+    "fact that has exactly one true value per project (location/address, RERA number, price, "
+    "developer, expected handover) gets exactly ONE bullet: if the context contains overlapping or "
+    "slightly differently worded excerpts about it, synthesize them into the single most complete "
+    "statement rather than listing each phrasing as if it were a separate fact.\n\n"
 
     "OUTPUT: bullet points only, one fact per bullet — no prose paragraph and no preamble. A "
     "single-fact answer is still a one-bullet list. Exception: a not-found/abstain answer is a "
@@ -80,8 +85,20 @@ COMPARE_SYSTEM = (
 
     "OUTPUT: keep each cell concise — a short phrase or comma-separated list, one sentence at most. "
     "Never reproduce a full list (e.g. every amenity) verbatim; summarize it. Keep `summary` to one "
-    "short sentence about the comparison itself — never describe the JSON format, these instructions, "
-    "or your own compliance with them."
+    "short plain-English sentence about the comparison itself — it must never contain braces, "
+    "brackets, quotes-as-delimiters, or key:value/JSON-like syntax, and must never describe the JSON "
+    "format, these instructions, or your own compliance with them."
+)
+
+UNIT_MATCH_SYSTEM = (
+    "ROLE: Given a real-estate project's unit-type entries (each with an index) and a question asking "
+    "about a specific unit configuration, return the indices of every entry that matches the requested "
+    "configuration.\n\n"
+
+    "GROUNDING: recognize equivalent phrasing — BHK/Bedroom/Bed/BR are the same concept, and a named "
+    "variant like '1 BHK WITH STUDY' or '3 BHK Premium' still matches a plain '1BHK'/'3 BHK' request "
+    "unless the question specifically asks about the variant. Return every matching entry, not just "
+    "one. Return an empty list if none match — never guess or return an unrelated entry."
 )
 
 SUMMARY_SYSTEM = (
@@ -145,11 +162,17 @@ def _excerpts_by_doc_id(records: list[dict], query_text: str, top_k: int = 3) ->
     return out
 
 
-def answer_factual(question: str, doc_ids: list[str] | None = None) -> dict:
+def answer_factual(question: str, doc_ids: list[str] | None = None, highlight_field: str | None = None) -> dict:
     """Vector RAG over chunks, plus the already-extracted structured record for any named
     project — filter/compare/summarize aren't the only paths that can use it. Chunk-only
     retrieval can miss a fact (e.g. a RERA number or amenity list) that the forced structured-
-    extraction call already captured cleanly at ingestion time."""
+    extraction call already captured cleanly at ingestion time.
+
+    `highlight_field`, when given, surfaces that one structured field (e.g. "developer") in its
+    own labeled block ahead of the full record — cheap, and lets developer_info answer straight
+    from the field the vast majority of the time without dropping the chunk search, which still
+    runs unconditionally so a question asking for more than the field holds (JV partners, ...)
+    isn't cut off."""
     [query_embedding] = llm.embed([question])
 
     records = []
@@ -157,7 +180,9 @@ def answer_factual(question: str, doc_ids: list[str] | None = None) -> dict:
         hits = []
         for doc_id in doc_ids:
             hits.extend(store.query_chunks(query_embedding, top_k=6, doc_id=doc_id))
-        records = [r for r in store.load_all_records() if r["doc_id"] in doc_ids]
+        # Merge duplicate records for the same project (re-upload, or split across documents) so
+        # the structured-facts context doesn't hand the model two conflicting versions of one fact.
+        records = store.group_and_merge_by_project([r for r in store.load_all_records() if r["doc_id"] in doc_ids])
     else:
         hits = store.query_chunks(query_embedding, top_k=8)
 
@@ -168,6 +193,17 @@ def answer_factual(question: str, doc_ids: list[str] | None = None) -> dict:
 
     context_parts = []
     if records:
+        if highlight_field:
+            highlighted = [
+                {"project_name": r.get("project_name"), highlight_field: r.get(highlight_field)}
+                for r in records
+                if r.get(highlight_field)
+            ]
+            if highlighted:
+                context_parts.append(
+                    f"{highlight_field.capitalize()} field already extracted for the named project(s):\n"
+                    + json.dumps(highlighted, indent=2)
+                )
         context_parts.append("Structured facts already extracted for the named project(s):\n" + _compact_table(records))
     if hits:
         chunk_context = "\n\n".join(
@@ -187,6 +223,121 @@ def answer_factual(question: str, doc_ids: list[str] | None = None) -> dict:
             page=h["metadata"]["page_number"],
         )
         for h in hits
+    ]
+    if not sources:
+        sources = [Source(project_name=r.get("project_name"), source_file=r["source_file"]) for r in records]
+
+    return {"answer_text": answer, "table_data": None, "sources": sources}
+
+
+def answer_developer_info(question: str, doc_ids: list[str] | None = None) -> dict:
+    """developer_info: thin wrapper over answer_factual that surfaces the structured `developer`
+    field up front. The chunk search still runs unchanged alongside it — cheap enough at this
+    corpus scale, and needed whenever the question asks for more than the field holds (JV
+    partners, etc.), so there's no need to special-case that detection here."""
+    return answer_factual(question, doc_ids, highlight_field="developer")
+
+
+_BHK_NUMBER = re.compile(r"(\d+(?:\.\d+)?)\s*[-\s]?(?:bhk|bed\s*room|bedroom|bed|br)\b", re.IGNORECASE)
+
+
+def _bhk_number(text: str) -> str | None:
+    match = _BHK_NUMBER.search(text or "")
+    return match.group(1) if match else None
+
+
+def _match_unit_types(question: str, unit_types: list[dict]) -> list[dict]:
+    """All unit_types entries matching the question's requested configuration — every match, not
+    top-k, same "consider everything" principle as the filter path. Simple string matching first
+    (handles 'BHK'/'Bedroom'/'Bed'/'BR' synonyms and named variants like '1 BHK WITH STUDY' via
+    the shared leading-number extraction), LLM as fallback for names the number regex can't parse
+    (e.g. 'penthouse', 'duplex'). No configuration detected in the question at all -> every entry
+    matches (a generic "what units does X offer" isn't a filter)."""
+    if not unit_types:
+        return []
+
+    wanted = _bhk_number(question)
+    if wanted is None:
+        return unit_types
+
+    matched = [u for u in unit_types if _bhk_number(u.get("type") or "") == wanted]
+    if matched:
+        return matched
+
+    listing = json.dumps([{"index": i, **u} for i, u in enumerate(unit_types)], indent=2)
+    prompt = f"Unit types (JSON, with index):\n{listing}\n\nQuestion: {question}"
+    try:
+        result = llm.generate_structured(prompt, UNIT_MATCH_SYSTEM, UnitMatchSelection, max_tokens=512)
+        return [unit_types[i] for i in result.indices if 0 <= i < len(unit_types)]
+    except Exception:
+        log.exception("_match_unit_types: LLM fallback failed for question=%r", question)
+        return []
+
+
+def answer_specification(question: str, doc_ids: list[str] | None = None) -> dict:
+    """specification_lookup: match the requested unit configuration against each project's
+    already-extracted unit_types structurally first, instead of relying on top-k chunk similarity
+    to surface the right table row. Falls back to the normal chunk search per-project when that
+    project has no unit_types extracted (or none matched), so scanned brochures with a missed
+    extraction don't regress versus the old behavior."""
+    records = store.group_and_merge_by_project(
+        [r for r in store.load_all_records() if not doc_ids or r["doc_id"] in doc_ids]
+    )
+    if not records:
+        return answer_factual(question, doc_ids)
+
+    [query_embedding] = llm.embed([question])
+
+    structural_parts, chunk_hits, cited_hits, structural_used = [], [], [], False
+    for r in records:
+        matched = _match_unit_types(question, r.get("unit_types") or [])
+        if matched:
+            structural_used = True
+            entry = {"project_name": r.get("project_name"), "matched_unit_types": matched}
+            excerpt_hits = store.query_chunks(query_embedding, top_k=6, doc_id=r["doc_id"])
+            if excerpt_hits:
+                entry["brochure_excerpts"] = [h["text"] for h in excerpt_hits]
+                cited_hits.extend(excerpt_hits)
+            structural_parts.append(entry)
+        else:
+            hits = store.query_chunks(query_embedding, top_k=6, doc_id=r["doc_id"])
+            chunk_hits.extend(hits)
+            cited_hits.extend(hits)
+
+    if not structural_used:
+        # No project in scope had a matching (or any) unit_types entry -- identical to the old
+        # chunk-vector-search + full-record behavior end to end.
+        return answer_factual(question, doc_ids)
+
+    log.info(
+        "answer_specification: question=%r doc_ids=%s structural=%d fallback_hits=%d",
+        question, doc_ids, len(structural_parts), len(chunk_hits),
+    )
+
+    context_parts = []
+    if structural_parts:
+        context_parts.append(
+            "Matched unit-type entries already extracted for the named project(s):\n"
+            + json.dumps(structural_parts, indent=2)
+        )
+    if chunk_hits:
+        chunk_context = "\n\n".join(
+            f"[{h['metadata'].get('project_name') or h['metadata']['source_file']}, "
+            f"p. {h['metadata']['page_number']}]\n{h['text']}"
+            for h in chunk_hits
+        )
+        context_parts.append("Raw excerpts (project(s) with no structural match above):\n\n" + chunk_context)
+
+    prompt = "\n\n".join(context_parts) + f"\n\nQuestion: {question}"
+    answer = llm.chat_text(prompt, system=ANSWER_SYSTEM, max_tokens=1024)
+
+    sources = [
+        Source(
+            project_name=h["metadata"].get("project_name") or None,
+            source_file=h["metadata"]["source_file"],
+            page=h["metadata"]["page_number"],
+        )
+        for h in cited_hits
     ]
     if not sources:
         sources = [Source(project_name=r.get("project_name"), source_file=r["source_file"]) for r in records]
@@ -235,7 +386,7 @@ def _scan_records(records: list[dict], condition: str) -> FilterResult:
 
 def filter_projects(criteria: str, names: list[str] | None = None) -> dict:
     """`names`, when given, scopes the table to specific named project(s) before filtering —
-    e.g. "does Vogue 77 offer 3BR units" should only ever look at Vogue 77, not every project.
+    
 
     A compound "X and Y" criteria is split into independent conditions and each is scanned
     separately, then the matching project sets are intersected in Python. A single LLM call
@@ -243,7 +394,7 @@ def filter_projects(criteria: str, names: list[str] | None = None) -> dict:
     intersecting them (and to self-contradict even when asked to self-check); running one
     condition per call and intersecting deterministically closes that failure mode instead of
     trusting the model to hold several conditions in its head simultaneously."""
-    records = store.load_all_records()
+    records = store.load_deduped_records()
     if names:
         records = [r for r in records if r.get("project_name") in names]
     if not records:
@@ -293,10 +444,21 @@ def filter_projects(criteria: str, names: list[str] | None = None) -> dict:
     return {"answer_text": result.summary, "table_data": table_data, "sources": sources}
 
 
+def _looks_malformed(summary: str) -> bool:
+    """Guard against the model dumping the structured rows into the free-text summary field
+    instead of a plain sentence (observed as raw '{"project_name": ..., "values": [...]}' or
+    'rows: [...]' text leaking into the answer). Cheap heuristic: a one-sentence summary should
+    never contain JSON/dict punctuation or run unreasonably long."""
+    if not summary:
+        return True
+    markers = ("{", "}", "[", "]", "rows:", "values:")
+    return any(m in summary for m in markers) or len(summary) > 400
+
+
 def compare_projects(names: list[str], dimensions: list[str]) -> dict:
     """`dimensions` empty means the caller didn't ask for anything specific — fall back to the
     handful of fields a buyer would compare by default rather than an empty/useless table."""
-    records = store.load_all_records()
+    records = store.load_deduped_records()
     selected = [r for r in records if r.get("project_name") in names] if names else records
     if not selected:
         return {"answer_text": NOT_FOUND, "table_data": None, "sources": []}
@@ -308,6 +470,11 @@ def compare_projects(names: list[str], dimensions: list[str]) -> dict:
     result = llm.generate_structured(prompt, COMPARE_SYSTEM, ComparisonResult, max_tokens=8192)
     log.info("compare_projects: names=%s dimensions=%s -> %d row(s)", names, dimensions, len(result.rows))
 
+    if _looks_malformed(result.summary):
+        log.warning("compare_projects: malformed summary from model, replacing: %r", result.summary)
+        project_list = ", ".join(r.get("project_name") or "" for r in selected)
+        result.summary = f"Comparison of {project_list} on {dims}."
+
     table_data = [
         {"project_name": row.project_name, **{v.dimension: v.value for v in row.values}}
         for row in result.rows
@@ -318,7 +485,7 @@ def compare_projects(names: list[str], dimensions: list[str]) -> dict:
 
 
 def summarize_projects(names: list[str] | None) -> dict:
-    records = store.load_all_records()
+    records = store.load_deduped_records()
     selected = [r for r in records if r.get("project_name") in names] if names else records
     if not selected:
         return {"answer_text": NOT_FOUND, "table_data": None, "sources": []}
@@ -348,7 +515,7 @@ def summarize_projects(names: list[str] | None) -> dict:
 
 def handle_general(question: str, known_projects: list[str]) -> dict:
     """Greetings, "what can you do", and other meta/out-of-scope questions that don't need the
-    document pipeline at all — kept out of factual_qa so they don't produce an unhelpful
+    document pipeline at all — kept out of factual_qa/developer_info/specification_lookup so they don't produce an unhelpful
     "not found in the uploaded documents" for something that was never a document lookup."""
     projects_list = ", ".join(known_projects) if known_projects else "(none ingested yet)"
     prompt = f"Ingested projects: {projects_list}\n\nUser message: {question}"

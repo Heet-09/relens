@@ -105,6 +105,63 @@ def load_all_records() -> list[dict]:
     return records
 
 
+def merge_project_records(records: list[dict]) -> dict:
+    """Collapse several structured records for the same project (re-uploaded brochure, or a
+    project split across multiple source documents) into one canonical view: scalar fields keep
+    the first non-null value found, amenities/unit_types are unioned. Without this, a duplicated
+    upload shows up as two rows in a comparison table or as two conflicting facts in an answer."""
+    if len(records) == 1:
+        return records[0]
+
+    merged = dict(records[0])
+    for field in ("developer", "location", "expected_handover", "starting_price", "other_facts"):
+        if not merged.get(field):
+            for r in records[1:]:
+                if r.get(field):
+                    merged[field] = r[field]
+                    break
+
+    amenities: list[str] = []
+    for r in records:
+        for a in r.get("amenities") or []:
+            if a not in amenities:
+                amenities.append(a)
+    merged["amenities"] = amenities
+
+    unit_types: list[dict] = []
+    seen = set()
+    for r in records:
+        for u in r.get("unit_types") or []:
+            key = (u.get("type"), u.get("area_sqft"))
+            if key not in seen:
+                seen.add(key)
+                unit_types.append(u)
+    merged["unit_types"] = unit_types
+
+    return merged
+
+
+def group_and_merge_by_project(records: list[dict]) -> list[dict]:
+    """Group records by project_name (case-insensitive) and merge each group into one record via
+    merge_project_records. Records with no project_name are kept separate (nothing to key on)."""
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for r in records:
+        key = (r.get("project_name") or "").strip().lower() or r["doc_id"]
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(r)
+    return [merge_project_records(groups[k]) for k in order]
+
+
+def load_deduped_records() -> list[dict]:
+    """load_all_records collapsed to one merged record per project — the view every
+    filter/comparison/summary should use so a duplicated or split upload doesn't produce
+    duplicate rows or conflicting facts."""
+    return group_and_merge_by_project(load_all_records())
+
+
 def save_pages(doc_id: str, pages) -> None:
     """Cache extracted (post-vision) page text — the expensive-to-recompute artifact — so the
     vector index can be rebuilt cheaply (local re-embed, no Gemini vision calls) if it's ever

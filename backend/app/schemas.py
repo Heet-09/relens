@@ -27,26 +27,57 @@ class ExtractedRecord(BaseModel):
     )
 
 
-IntentLiteral = Literal["factual_qa", "amenity_filter", "unit_filter", "comparison", "summarization", "general"]
+IntentLiteral = Literal[
+    "factual_qa",
+    "developer_info",
+    "specification_lookup",
+    "amenity_filter",
+    "unit_filter",
+    "comparison",
+    "summarization",
+    "general",
+]
 
 
 class IntentClassification(BaseModel):
-    intent: IntentLiteral
-    project_names: list[str] = Field(default_factory=list)
-    amenities: list[str] = Field(default_factory=list)
-    unit_filter_type: Optional[str] = None
-    comparison_dimensions: list[str] = Field(default_factory=list)
+    reasoning: str = Field(
+        default="",
+        description="One short sentence (max 25 words) saying which disambiguation rule decided the "
+        "intent. Never mention JSON, schemas, or instructions.",
+    )
+    project_names: list[str] = Field(
+        default_factory=list,
+        description="Projects in scope, using the exact spelling from the known-project list. Resolve "
+        "'these/those/the second one' from the conversation. A project the user named that is not in "
+        "the list is kept as the user wrote it. Empty when the question is about all projects or names none.",
+    )
     resolved_question: Optional[str] = Field(
         default=None,
-        description="Only set when the question is a follow-up relying on conversation history "
-        "(pronouns, omitted subject, 'the second one', etc.) — the same question rewritten to "
-        "stand on its own. Leave empty/null otherwise.",
+        description="The question rewritten to stand on its own: pronouns and omitted subjects "
+        "resolved, projects named explicitly, every condition (amenity, unit type, location, price, "
+        "...) preserved. This is the exact text handed to the filter/lookup step. If the question "
+        "already stands on its own, the original question unchanged.",
+    )
+    intent: IntentLiteral
+    amenities: list[str] = Field(
+        default_factory=list,
+        description="Amenities the user asks about or filters on, as short lowercase singular phrases "
+        "('swimming pool', 'gym', 'clubhouse'). Empty if none.",
+    )
+    unit_filter_type: Optional[str] = None
+    comparison_dimensions: list[str] = Field(
+        default_factory=list,
+        description="Attributes to compare. Use this vocabulary when it fits: 'price', 'location', "
+        "'developer', 'handover', 'amenities', 'unit types'. For anything else the user explicitly "
+        "names (e.g. 'RERA registration', 'floor count', 'parking'), keep it as its own short phrase "
+        "instead of dropping it or forcing it into the list above. Empty only if the user named none.",
     )
     sub_questions: list[str] = Field(
         default_factory=list,
         description="Only set when the question genuinely asks 2-4 separate things needing different "
         "answers (e.g. 'summarize X and compare it to Y on price'). Each entry is one standalone "
-        "sub-question. Leave empty for a single-part question.",
+        "sub-question naming its projects. One filter with several conditions is ONE question, not a "
+        "split. Leave empty for a single-part question.",
     )
 
 
@@ -72,6 +103,14 @@ class FilterResult(BaseModel):
         description="One short sentence (<= 25 words) describing the result itself — e.g. how many "
         "projects matched and why. Never mention JSON, formatting, schemas, instructions, or your "
         "own compliance with them."
+    )
+
+
+class UnitMatchSelection(BaseModel):
+    indices: list[int] = Field(
+        default_factory=list,
+        description="0-based indices into the given unit_types list that match the requested "
+        "configuration in the question. Empty if none match.",
     )
 
 
