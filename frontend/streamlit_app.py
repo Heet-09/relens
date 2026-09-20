@@ -21,6 +21,12 @@ def fetch_documents():
         return []
 
 
+def render_table(table_data):
+    df = pd.DataFrame(table_data).drop(columns=["reason"], errors="ignore")
+    df.index = range(1, len(df) + 1)
+    st.dataframe(df, use_container_width=True)
+
+
 def render_sources(sources):
     if not sources:
         return
@@ -100,7 +106,7 @@ for turn in st.session_state.history:
         if turn.get("caption"):
             st.caption(turn["caption"])
         if turn.get("table"):
-            st.dataframe(pd.DataFrame(turn["table"]), use_container_width=True)
+            render_table(turn["table"])
         render_sources(turn.get("sources"))
 
 question = st.chat_input("Ask about the uploaded brochures...")
@@ -118,7 +124,7 @@ if question:
                 st.write(data["answer_text"])
                 st.caption(f"intent: {data['intent']}")
                 if data.get("table_data"):
-                    st.dataframe(pd.DataFrame(data["table_data"]), use_container_width=True)
+                    render_table(data["table_data"])
                 render_sources(data.get("sources"))
                 st.session_state.history.append(
                     {
