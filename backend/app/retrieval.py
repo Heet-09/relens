@@ -231,11 +231,77 @@ def answer_factual(question: str, doc_ids: list[str] | None = None, highlight_fi
 
 
 def answer_developer_info(question: str, doc_ids: list[str] | None = None) -> dict:
-    """developer_info: thin wrapper over answer_factual that surfaces the structured `developer`
-    field up front. The chunk search still runs unchanged alongside it — cheap enough at this
-    corpus scale, and needed whenever the question asks for more than the field holds (JV
-    partners, etc.), so there's no need to special-case that detection here."""
-    return answer_factual(question, doc_ids, highlight_field="developer")
+    """developer_info: answer straight from the already-extracted `developer` field (plus
+    `expected_handover` when present) per in-scope project — structural, not chunk search. A
+    project whose field is present still gets a few supplementary excerpts pulled in (JV
+    partners, holding-company detail, etc. that the single-string field can't hold), same
+    "structural primary, chunk search only ever supplements" pattern as answer_specification.
+    A project with no developer field at all falls back fully to chunk search — per project, not
+    for the whole query, so one project's missing extraction doesn't drag the others down."""
+    records = store.group_and_merge_by_project(
+        [r for r in store.load_all_records() if not doc_ids or r["doc_id"] in doc_ids]
+    )
+    if not records:
+        return answer_factual(question, doc_ids)
+
+    [query_embedding] = llm.embed([question])
+
+    structural_parts, chunk_hits, cited_hits, structural_used = [], [], [], False
+    for r in records:
+        if r.get("developer"):
+            structural_used = True
+            entry = {
+                "project_name": r.get("project_name"),
+                "developer": r.get("developer"),
+                "expected_handover": r.get("expected_handover"),
+            }
+            excerpt_hits = store.query_chunks(query_embedding, top_k=3, doc_id=r["doc_id"])
+            if excerpt_hits:
+                entry["brochure_excerpts"] = [h["text"] for h in excerpt_hits]
+                cited_hits.extend(excerpt_hits)
+            structural_parts.append(entry)
+        else:
+            hits = store.query_chunks(query_embedding, top_k=6, doc_id=r["doc_id"])
+            chunk_hits.extend(hits)
+            cited_hits.extend(hits)
+
+    if not structural_used:
+        return answer_factual(question, doc_ids)
+
+    log.info(
+        "answer_developer_info: question=%r doc_ids=%s structural=%d fallback_hits=%d",
+        question, doc_ids, len(structural_parts), len(chunk_hits),
+    )
+
+    context_parts = []
+    if structural_parts:
+        context_parts.append(
+            "Developer/handover facts already extracted for the named project(s):\n"
+            + json.dumps(structural_parts, indent=2)
+        )
+    if chunk_hits:
+        chunk_context = "\n\n".join(
+            f"[{h['metadata'].get('project_name') or h['metadata']['source_file']}, "
+            f"p. {h['metadata']['page_number']}]\n{h['text']}"
+            for h in chunk_hits
+        )
+        context_parts.append("Raw excerpts (project(s) with no structural match above):\n\n" + chunk_context)
+
+    prompt = "\n\n".join(context_parts) + f"\n\nQuestion: {question}"
+    answer = llm.chat_text(prompt, system=ANSWER_SYSTEM, max_tokens=512)
+
+    sources = [
+        Source(
+            project_name=h["metadata"].get("project_name") or None,
+            source_file=h["metadata"]["source_file"],
+            page=h["metadata"]["page_number"],
+        )
+        for h in cited_hits
+    ]
+    if not sources:
+        sources = [Source(project_name=r.get("project_name"), source_file=r["source_file"]) for r in records]
+
+    return {"answer_text": answer, "table_data": None, "sources": sources}
 
 
 _BHK_NUMBER = re.compile(r"(\d+(?:\.\d+)?)\s*[-\s]?(?:bhk|bed\s*room|bedroom|bed|br)\b", re.IGNORECASE)

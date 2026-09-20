@@ -1,4 +1,4 @@
-# Realty Lens — One-Pager
+  # Realty Lens — One-Pager
 
 ## What it is
 A prototype assistant for Realty Lens staff: upload PDF project brochures, ask natural-language
@@ -16,9 +16,9 @@ extracts a compact JSON record (developer, location, amenities, unit types). Mul
 ingest concurrently.
 
 **Query:** a Gemini structured-output call routes each question its intents.
-Open-ended factual/spec questions use vector similarity search (optionally scoped to a named
-project) with page-level citations. Filter, comparison, and summarization questions instead scan
-the structured JSON store exhaustively across every document, since top-k similarity can
+Open-ended factual questions use vector similarity search  primarily (optionally scoped to a named
+project) with page-level citations. Filter, comparison, and summarization, spec questions instead scan primarliy
+the structured JSON store exhaustively across every document and use vector search as a supplementary, since top-k similarity can
 silently miss a matching project on a filter query. All generation is constrained to answer only
 from retrieved context. History is logged to JSONL and replayed on reload.
 
@@ -54,5 +54,5 @@ they're missing (crash, corrupted restart) — no re-spent Gemini vision calls.
 - **Lead-qualification agent** on top of the existing filter path — take a client's stated
   requirements (budget, location, BHK) and auto-run the filter query to hand the sales rep a
   shortlist, instead of the rep typing it themselves.
-- **A more polished UI** — the current Streamlit frontend is functional but normal; a
-  proper front-end (richer chat layout, table/comparison rendering, upload progress)
+- **A more polished UI** — the current Streamlit frontend is functional but plain; a
+  proper front-end (richer chat layout, table/comparison rendering, upload progress).
